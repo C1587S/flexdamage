@@ -1,0 +1,38 @@
+[project]
+name = "flexdamage"
+version = "0.1.0"
+description = "Flexible damage function estimation library"
+requires-python = ">=3.9"
+dependencies = [
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "duckdb>=0.9.0",
+    "pyyaml>=6.0",
+    "pydantic>=2.0.0",
+    "statsmodels>=0.14.0",
+    "sympy>=1.12",
+    "seaborn>=0.13.0",
+    "matplotlib>=3.7.0",
+    "tqdm>=4.66.0"
+]
+
+[project.optional-dependencies]
+spatial = [
+    "geopandas>=0.14.0",
+    "contextily>=1.5.0",
+    "folium>=0.15.0"
+]
+dev = [
+    "pytest>=7.0.0",
+    "black",
+    "isort",
+    "mypy"
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["flexdamage*"]

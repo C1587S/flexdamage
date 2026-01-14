@@ -1,0 +1,36 @@
+data:
+  aggregation:
+    dims:
+    - iso3
+    - year
+    method: mean
+    weights: pop
+  columns:
+    region: iso3
+    w: pop
+    x: lgdp_delta
+    x1: temperature_anomaly
+    y: mortality_impact
+  dataset_dir: step_by_step_output/data
+  source_format: csv
+estimation:
+  constraints:
+  - parameter: beta
+    type: convexity
+  functional_form:
+    formula: alpha * x + beta * x**2
+    type: explicit
+  global:
+    method: fixed_effects
+    temperature_bins: 5
+  regional:
+    aggregation_level: country
+    backend: pandas
+    min_observations: 10
+execution:
+  test_mode: false
+run:
+  name: step_by_step_run
+  output_dir: step_by_step_output/results
+sector:
+  name: mortality

@@ -1,0 +1,10 @@
+name: flex-damage-refactor
+prefix: /project/cil/home_dirs/scadavidsanchez/envs/flex-damage-refactor
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.12
+  - pip
+  - uv

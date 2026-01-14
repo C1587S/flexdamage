@@ -1,0 +1,47 @@
+# Example: Agriculture Cassava (Country Level) with Explicit Formula
+run:
+  name: "cassava_country_explicit"
+  description: "Country-level estimation for Cassava using custom formula"
+  output_dir: "./results/agriculture/cassava_country"
+  
+sector:
+  name: "agriculture"
+  subsector: "cassava"
+  
+data:
+  dataset_dir: "flexdamage-dev/dataset/agriculture"
+  source_format: "csv"
+  
+  # Map columns from dataset to standard names
+  columns:
+    y: "log_yield_impact"
+    x1: "temperature_anomaly" # used as 'temp' in formula
+    w: "pop"
+    income: "gdppc" # used for normalization
+    
+estimation:
+  functional_form:
+    type: "explicit"
+    # Custom quadratic formula with explicit parameters
+    # Note: 'temp' must be mapped in variables logic or use x1
+    formula: "alpha * x1 + beta * x1**2"
+    
+  global:
+    method: "fixed_effects"
+    temperature_bins: 0.5
+    
+  regional:
+    aggregation_level: "country"
+    backend: "pandas" # Use in-memory for country level
+    min_observations: 10
+    
+  constraints:
+    # Symbolic constraint
+    - type: "formula"
+      expression: "beta <= 0"
+
+execution:
+  mode: "local"
+  n_workers: 4
+  test_mode: true
+  test_sample_size: 5000
