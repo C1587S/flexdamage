@@ -153,3 +153,72 @@ class DuckDBBackend(DataBackend):
         con = self._connect()
         query = f"SELECT DISTINCT {column} FROM {self.table_name} ORDER BY {column}"
         return [r[0] for r in con.execute(query).fetchall()]
+
+class PolarsBackend(DataBackend):
+    """
+    Backend using Polars for high-performance data processing.
+    """
+    def __init__(self, df: Any):
+        import polars as pl
+        self.df = df
+        
+    @classmethod
+    def from_csv(cls, path: str, **kwargs):
+        import polars as pl
+        logger.info(f"Loading CSV with Polars from {path}")
+        return cls(pl.read_csv(path, **kwargs))
+        
+    @classmethod
+    def from_parquet(cls, path: str, **kwargs):
+        import polars as pl
+        logger.info(f"Loading Parquet with Polars from {path}")
+        # Use simple read_parquet for now, can support scan_parquet later for lazy eval
+        return cls(pl.read_parquet(path, **kwargs))
+        
+    def load_data(
+        self, 
+        columns: Optional[List[str]] = None, 
+        filters: Optional[Dict[str, Any]] = None,
+        sample_size: Optional[int] = None,
+        random_seed: int = 42
+    ) -> pd.DataFrame:
+        import polars as pl
+        
+        # Start with lazy frame if possible, but we initialized with DataFrame usually
+        # If self.df is pl.DataFrame, make it lazy to chain operations efficiently
+        if isinstance(self.df, pl.DataFrame):
+            lf = self.df.lazy()
+        else:
+            lf = self.df # Assume it's already LazyFrame if we did scan
+            
+        # Select columns
+        if columns:
+            # Deduplicate columns
+            columns = list(dict.fromkeys(columns))
+            lf = lf.select(columns)
+            
+        # Apply filters
+        if filters:
+            for col, val in filters.items():
+                if isinstance(val, (list, tuple)):
+                    lf = lf.filter(pl.col(col).is_in(val))
+                else:
+                    lf = lf.filter(pl.col(col) == val)
+                    
+        # Sampling
+        if sample_size:
+            # For LazyFrame, sample is tricky.
+            # Easiest way strictly following the interface which returns pandas:
+            # Collect and then sample, or sample in polars if possible.
+            # Polars sample on LazyFrame is supported
+            lf = lf.collect().sample(n=sample_size, seed=random_seed).lazy()
+            
+        return lf.collect().to_pandas()
+
+    def get_unique_values(self, column: str) -> List[Any]:
+        import polars as pl
+        if isinstance(self.df, pl.LazyFrame):
+            df = self.df.collect()
+        else:
+            df = self.df
+        return sorted(df[column].unique().to_list())

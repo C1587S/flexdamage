@@ -102,54 +102,187 @@ class RegionalEstimator:
         
         params = dict(zip(param_names, coeffs))
         
-        # Check specific constraint: "concavity" (beta <= 0) or "convexity" (beta >= 0) on "beta"
-        beta_idx = -1
-        if "beta" in param_names:
-            beta_idx = param_names.index("beta")
-            
-        if beta_idx >= 0:
-            beta_val = params["beta"]
-            re_estimate = False
-            
-            # Check Concavity (Beta must be <= 0, if > 0 then constraint violated)
-            if beta_val > 0 and any(c.type == "concavity" and c.parameter == "beta" for c in self.config.estimation.constraints):
-                re_estimate = True
-                
-            # Check Convexity (Beta must be >= 0, if < 0 then constraint violated)
-            # Reference script: if coef(mod)[3] < 0 { mod <- lm(... ~ delta_temp) ... } -> this forces linear if concave
-            elif beta_val < 0 and any(c.type == "convexity" and c.parameter == "beta" for c in self.config.estimation.constraints):
-                re_estimate = True
-            
-            if re_estimate:
-                # Re-estimate with beta=0
-                # Drop beta column from X
-                X_constr = np.delete(X_clean, beta_idx, axis=1)
-                coeffs_constr, _, _, _ = np.linalg.lstsq(X_constr, y_clean, rcond=None)
-                
-                # Reconstruct full params
-                new_coeffs = []
-                c_ptr = 0
-                for i in range(len(param_names)):
-                    if i == beta_idx:
-                        new_coeffs.append(0.0)
-                    else:
-                        new_coeffs.append(coeffs_constr[c_ptr])
-                        c_ptr += 1
-                coeffs = np.array(new_coeffs)
-                params = dict(zip(param_names, coeffs))
+        # 4. Apply Constraints
+        coeffs = self._apply_constraints(X_clean, y_clean, param_names, coeffs)
+        params = dict(zip(param_names, coeffs))
                 
         # 5. Calculate Heteroskedasticity / Diagnostics
         # Residuals
         y_pred = X_clean @ coeffs
         residuals = y_clean - y_pred
         
-        # Compute r-squared, etc.
+        # Calculate standard metrics
         sst = np.sum((y_clean - y_clean.mean())**2)
         ssr = np.sum(residuals**2)
-        r2 = 1 - (ssr/sst) if sst > 0 else 0
+        rsqr1 = 1 - (ssr/sst) if sst > 0 else 0
         
+        # Calculate s2 (variance of residuals)
+        dof = len(y_clean) - len(coeffs)
+        s2 = ssr / dof if dof > 0 else 0
+        
+        # --- Advanced R-script Metrics (zeta, eta) ---
+        # "mod2 <- lm(totalsd_scaled ~ 0 + delta_temp, data = subdf)"
+        # totalsd_scaled <- sqrt(subdf$resids^2) (which is just abs(residuals))
+        # We regression abs(residuals) on temperature (column 0 of X is usually constant? No, X is symbolic)
+        # We need the 'temperature' column specifically. 
+        # In symbolic design matrix, we might have 'x', 'x^2'. 
+        # We need 'x' (or 'delta_temp' equivalent).
+        # Let's try to extract 'x' column from design matrix if possible, or use df column using vars_map.
+        
+        # Assume 'x' in vars_map is temperature
+        temp_col = self.config.data.columns.get("x1") or self.config.data.columns.get("x")
+        
+        zeta = np.nan
+        eta = np.nan
+        rsqr2 = np.nan
+        
+        if temp_col and temp_col in df.columns:
+            # Re-extract temp corresponding to the cleaned mask
+            # Note: X_clean and y_clean used mask. We need temp for same rows.
+            temp_vals = df.loc[df.index[mask], temp_col].values
+            
+            # Target for mod2: abs(residuals)
+            dependent_var = np.abs(residuals)
+            
+            # Regressor: 0 + delta_temp (just temp, no intercept)
+            # Reshape for OLS
+            X_mod2 = temp_vals.reshape(-1, 1)
+            
+            try:
+                # fit mod2
+                # coeff, resid, rank, s
+                c2, res2, _, _ = np.linalg.lstsq(X_mod2, dependent_var, rcond=None)
+                zeta = c2[0]
+                
+                # eta = sd(residuals(mod2))
+                # residuals of mod2
+                pred2 = X_mod2 @ c2
+                resid2 = dependent_var - pred2
+                eta = np.std(resid2) # using population or sample sd? R usually sample
+                eta = np.std(resid2, ddof=1) if len(resid2) > 1 else 0
+                
+                # rsqr2
+                sst2 = np.sum((dependent_var - dependent_var.mean())**2)
+                ssr2 = np.sum(resid2**2)
+                rsqr2 = 1 - (ssr2/sst2) if sst2 > 0 else 0
+                
+            except Exception:
+                pass
+
         # Return results
-        res = {"region": region_id, "n_obs": int(mask.sum()), "rsqr": r2}
+        # 'n' is n_obs
+        res = {
+            "region": region_id, 
+            "n": int(mask.sum()), 
+            "rsqr1": rsqr1,
+            "rsqr2": rsqr2,
+            "s2": s2,
+            "zeta": zeta,
+            "eta": eta,
+            # Placeholder for rho (requires global residuals correlation, hard to do inside single region estimation without global context passed in)
+            "rho": 0.0 
+        }
         res.update(params)
         
         return res
+
+    def _apply_constraints(self, X, y, param_names, initial_coeffs):
+        """
+        Check and enforce constraints. If violated, re-estimate with fixed parameter.
+        Supports: convexity, concavity, and explicit formulas (e.g. "beta >= 0").
+        """
+        current_coeffs = initial_coeffs.copy()
+        params = dict(zip(param_names, current_coeffs))
+        
+        import re
+
+        for constraint in self.config.estimation.constraints:
+            violated = False
+            fix_val = 0.0
+            param_to_fix = None
+            
+            # 1. Pre-defined types
+            if constraint.type == "convexity":
+                # beta >= 0 (default)
+                p = constraint.parameter or "beta"
+                if p in params and params[p] < 0:
+                    violated = True
+                    param_to_fix = p
+                    fix_val = 0.0
+                    
+            elif constraint.type == "concavity":
+                # beta <= 0 (default)
+                p = constraint.parameter or "beta"
+                if p in params and params[p] > 0:
+                    violated = True
+                    param_to_fix = p
+                    fix_val = 0.0
+            
+            # 2. Explicit Formula (e.g. "beta >= 0", "alpha <= 1.5")
+            elif constraint.type == "formula" and constraint.expression:
+                expr = constraint.expression.strip()
+                # Parse "param >= val" or "param <= val"
+                # Regex for: param, op, val (float)
+                match = re.match(r"^([a-zA-Z0-9_]+)\s*(>=|<=|>|<)\s*([-+]?[0-9]*\.?[0-9]+)$", expr)
+                if match:
+                    p, op, val_str = match.groups()
+                    thresh = float(val_str)
+                    
+                    if p in params:
+                        val = params[p]
+                        if op == ">=" and val < thresh:
+                            violated = True
+                            param_to_fix = p
+                            fix_val = thresh
+                        elif op == ">" and val <= thresh:
+                            violated = True
+                            param_to_fix = p
+                            fix_val = thresh # Boundary solution
+                        elif op == "<=" and val > thresh:
+                            violated = True
+                            param_to_fix = p
+                            fix_val = thresh
+                        elif op == "<" and val >= thresh:
+                            violated = True
+                            param_to_fix = p
+                            fix_val = thresh # Boundary solution
+                else:
+                    logger.warning(f"Could not parse constraint formula: {expr}")
+
+            if violated and param_to_fix is not None:
+                logger.info(f"Constraint violated: {param_to_fix} ({params[param_to_fix]:.4f}) violates {constraint.type}/{constraint.expression}. Fixing to {fix_val}.")
+                return self._refit_with_fixed_param(X, y, param_names, param_to_fix, fix_val)
+                
+        return current_coeffs
+
+    def _refit_with_fixed_param(self, X, y, param_names, param_to_fix, fix_val):
+        """
+        Re-estimate OLS with one parameter fixed to a specific value.
+        y_adj = y - fix_val * X[:, idx]
+        Fit y_adj ~ X_reduced
+        """
+        try:
+            idx = param_names.index(param_to_fix)
+        except ValueError:
+            return np.zeros(len(param_names)) # Should not happen
+
+        # Adjust y
+        y_adj = y - fix_val * X[:, idx]
+        
+        # Remove column from X
+        X_reduced = np.delete(X, idx, axis=1)
+        
+        # Refit
+        coeffs_constr, _, _, _ = np.linalg.lstsq(X_reduced, y_adj, rcond=None)
+        
+        # Reconstruct full coefficients list
+        new_coeffs = []
+        c_ptr = 0
+        for i in range(len(param_names)):
+            if i == idx:
+                new_coeffs.append(fix_val)
+            else:
+                new_coeffs.append(coeffs_constr[c_ptr])
+                c_ptr += 1
+                
+        return np.array(new_coeffs)

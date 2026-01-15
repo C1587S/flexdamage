@@ -13,6 +13,26 @@ from ..utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
 
+def _run_single_region(args):
+    """
+    Helper for parallel execution.
+    args: (region, df_reg, estimator_config, gamma, data_columns, functional_form_type, functional_form_formula, constraints)
+    Since we cannot pickle the entire estimator easily if it has open connections or complex state,
+    we re-instantiate a lightweight estimator or pass necessary data.
+    Actually, RegionalEstimator is lightweight if initialized.
+    Better: pass (region, df_reg, estimator_instance) if picklable. 
+    But estimator has config which might be large? No, config is Pydantic.
+    Let's rely on pickling the estimator.
+    """
+    region, df_reg, estimator = args
+    if df_reg.empty:
+        return None
+    try:
+        return estimator.estimate_region(region, df_reg)
+    except Exception as e:
+        logger.error(f"Error extracting region {region}: {e}")
+        return None
+
 class EstimationPipeline:
     """
     Orchestrates the full estimation workflow:
@@ -94,25 +114,54 @@ class EstimationPipeline:
         regional_results = []
         reg_col = self.config.data.columns.get("region", "region")
         
-        for region in target_regions:
-            # Get data for region
-            if df_source is not None:
-                df_reg = df_source[df_source[reg_col] == region]
-            else:
-                # Query backend for specific region
-                # We need all columns for regional est (including income, temp, etc.)
-                all_cols = self._get_regional_columns()
-                df_reg = backend.load_data(
-                    columns=all_cols,
-                    filters={reg_col: region}
-                )
+        # Parallel Execution
+        n_workers = self.config.execution.n_workers
+        
+        if n_workers > 1:
+            logger.info(f"Parallelizing regional estimation with {n_workers} workers")
+            from concurrent.futures import ProcessPoolExecutor
             
-            if df_reg.empty:
-                continue
+            # Prepare tasks
+            tasks = []
+            for region in target_regions:
+                if df_source is not None:
+                    df_reg = df_source[df_source[reg_col] == region]
+                else:
+                    # NOTE: Parallelizing backend queries might be bad for some backends (DuckDB concurrency)
+                    # Ideally we preload data or backend handles it.
+                    # For now assume backend is thread-safe or we are using Pandas
+                    all_cols = self._get_regional_columns()
+                    df_reg = backend.load_data(columns=all_cols, filters={reg_col: region})
                 
-            res = reg_est.estimate_region(region, df_reg)
-            if res:
-                regional_results.append(res)
+                if not df_reg.empty:
+                    tasks.append((region, df_reg, reg_est))
+            
+            with ProcessPoolExecutor(max_workers=n_workers) as executor:
+                results = executor.map(_run_single_region, tasks)
+                
+            regional_results = [r for r in results if r is not None]
+            
+        else:
+            # Serial Execution
+            for region in target_regions:
+                # Get data for region
+                if df_source is not None:
+                    df_reg = df_source[df_source[reg_col] == region]
+                else:
+                    # Query backend for specific region
+                    # We need all columns for regional est (including income, temp, etc.)
+                    all_cols = self._get_regional_columns()
+                    df_reg = backend.load_data(
+                        columns=all_cols,
+                        filters={reg_col: region}
+                    )
+                
+                if df_reg.empty:
+                    continue
+                    
+                res = reg_est.estimate_region(region, df_reg)
+                if res:
+                    regional_results.append(res)
                 
         # 4. Save Regional Results
         if regional_results:
@@ -128,8 +177,56 @@ class EstimationPipeline:
             diag_dir.mkdir(exist_ok=True)
             
             plot_gamma_distribution(global_results, diag_dir)
-            plot_parameter_distributions(df_results, diag_dir)
-            plot_prediction_curves(df_results, self.config.estimation.functional_form.formula or "alpha*x+beta*x**2", diag_dir)
+            
+            # --- Advanced Diagnostics (Visualizer) ---
+            from ..diagnostics.visualizer import DiagnosticVisualizer
+            visualizer = DiagnosticVisualizer(diag_dir)
+            
+            # Parameter Distributions (Refined)
+            visualizer.plot_parameter_distributions(df_results)
+            
+            # Worst Offenders (Detailed)
+            # Strategy: identify regions, load data, plot
+            # Criteria: 'eta' (largest residuals/noise) is a good default for "worst fit"
+            worst_regions = visualizer.select_worst_regions(df_results, criteria="eta", n=9)
+            
+            if worst_regions and not df_global.empty:
+               # Try to filter from loaded global data first
+               # Check if global data has 'region' column
+               reg_col = self.config.data.columns.get("region", "region")
+               if reg_col in df_global.columns:
+                   df_worst = df_global[df_global[reg_col].isin(worst_regions)]
+                   
+                   # Map columns for plotting
+                   x_col = self.config.data.columns.get("x1") or self.config.data.columns.get("x")
+                   y_col = self.config.data.columns.get("y")
+                   
+                   
+                   if x_col and y_col:
+                       # Call Enhanced Plot
+                       # Determine color column: preferentially GDP-like if available, else Pop
+                       color_col = None
+                       potential_cols = ["lgdp_delta", "loggdppc", self.config.data.columns.get("w")]
+                       for c in potential_cols:
+                           if c and c in df_worst.columns:
+                               color_col = c
+                               break
+                               
+                       visualizer.plot_fit_diagnostics(
+                           df_results=df_results, 
+                           df_data=df_worst, 
+                           x_col=x_col, 
+                           y_col=y_col,
+                           gamma=gamma,
+                           color_col=color_col,
+                           regions=worst_regions.tolist() if hasattr(worst_regions, 'tolist') else worst_regions,
+                           n_cols=5
+                       )
+            
+            # --- Legacy / Alternative Diagnostics ---
+            from ..diagnostics.advanced import plot_spaghetti_curves, analyze_zero_crossings
+            plot_spaghetti_curves(df_results, self.config.estimation.functional_form.formula or "alpha*x+beta*x**2", diag_dir)
+            analyze_zero_crossings(df_results, diag_dir)
             
             # --- F2 Generation ---
             # Ideally we load a separate projections dataset. 
@@ -179,6 +276,19 @@ class EstimationPipeline:
                 self.config.data.dataset_dir, # This assumes db file path
                 self.config.data.table_name
             )
+            
+        if backend_type == "polars":
+            from ..data.backends import PolarsBackend
+            # Similar file finding logic as pandas
+            path = Path(self.config.data.dataset_dir)
+            if path.is_file():
+                return PolarsBackend.from_csv(str(path))
+            elif path.is_dir():
+                files = list(path.glob("*.csv"))
+                if files:
+                    return PolarsBackend.from_csv(str(files[0]))
+                else:
+                    raise ValueError(f"No CSV files found in {path}")
             
         raise ValueError(f"Unknown or improperly configured backend: {backend_type}")
 

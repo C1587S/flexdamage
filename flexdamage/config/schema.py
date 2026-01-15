@@ -48,7 +48,7 @@ class DataConfig(BaseModel):
 
 class RegionalEstimationConfig(BaseModel):
     aggregation_level: Literal["impact_region", "adm1", "adm2", "country"]
-    backend: Literal["auto", "pandas", "duckdb"] = "auto"
+    backend: Literal["auto", "pandas", "duckdb", "polars"] = "auto"
     min_observations: int = 5
     
 class GlobalEstimationConfig(BaseModel):
@@ -65,6 +65,14 @@ class ExecutionConfig(BaseModel):
     mode: Literal["local", "slurm"] = "local"
     n_workers: int = 1
     memory_limit_gb: float = 16.0
+    
+    # Slurm Config
+    slurm_account: Optional[str] = None
+    slurm_partition: Optional[str] = "normal"
+    slurm_time: str = "01:00:00"
+    slurm_mem: str = "16G"
+    slurm_cpus_per_task: int = 1
+    slurm_extra_args: Dict[str, str] = {}
     
     test_mode: bool = False
     test_sample_size: Optional[int] = 1000

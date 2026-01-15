@@ -87,11 +87,27 @@ class GlobalEstimator:
         
         logger.info(f"Estimated Gamma: {gamma:.6f} (SE: {gamma_se:.6f})")
         
+        # Capture residuals for diagnostics
+        # mod.resid index matches the data used (df)
+        df["residuals"] = mod.resid
+        
+        # Prepare diagnostic dataframe (Year, Residuals, + Categorical cols if present)
+        diag_cols = ["year", "residuals"]
+        for cat_col in ["ssp", "rcp", "model"]:
+            if cat_col in df.columns:
+                diag_cols.append(cat_col)
+                
+        # Drop duplicates if multiple points per year/region? 
+        # Regression is on (Region, Year) level usually.
+        # Just return the relevant columns.
+        diag_df = df[diag_cols].copy()
+        
         return {
             "gamma": gamma,
             "gamma_se": gamma_se,
             "r_squared": mod.rsquared,
-            "n_obs": int(mod.nobs)
+            "n_obs": int(mod.nobs),
+            "diagnostics": diag_df.to_dict(orient="list") # return as list dict for easy serialization/reconstruction
         }
 
     def _estimate_ols(self, df: pd.DataFrame) -> Dict[str, Any]:
