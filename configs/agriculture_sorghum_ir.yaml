@@ -1,0 +1,58 @@
+# =============================================================================
+# Agriculture - Sorghum IR Estimation Configuration
+# =============================================================================
+# Uses IR zarr data from: {data_base}/agriculture/sorghum/ir/ir.zarr
+
+run:
+  name: "agriculture_sorghum_ir"
+  description: "Sorghum yield response estimation from IR data"
+  output_dir: "/project/cil/home_dirs/scadavidsanchez/projects/flex-damages-data/agriculture/sorghum/results/ir"
+
+sector:
+  name: "agriculture"
+  subsector: "sorghum"
+
+data:
+  dataset_dir: "/project/cil/home_dirs/scadavidsanchez/projects/flex-damages-data/agriculture/sorghum/ir/ir.zarr"
+  source_format: "zarr"
+
+  columns:
+    y: "log_yield_impact"
+    x1: "loggdppc"
+    x2: "temperature_anomaly"
+    x: "temperature_anomaly"
+    w: "pop"
+    region: "region"
+    year: "year"
+
+  aggregation:
+    dims: ["region", "year", "ssp", "rcp", "model"]
+    method: "mean"
+    weights: "pop"
+
+estimation:
+  functional_form:
+    type: "explicit"
+    formula: "intercept + alpha * x + beta * x**2"
+
+  global:
+    method: "fixed_effects"
+    temperature_bins: 0.5
+
+  regional:
+    aggregation_level: "impact_region"
+    backend: "pandas"
+    min_observations: 10
+    normalization_method: "ratio"
+    include_intercept: true
+
+  constraints:
+    - type: "formula"
+      expression: "beta <= 0"
+
+execution:
+  mode: "local"
+  n_workers: 1
+  test_mode: false
+  test_sample_size: 100
+  test_seed: 42
